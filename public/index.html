@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Стиральная машина</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <p class="hero-kicker">Общежитие</p>
+        <h1>Стиральная машина</h1>
+      </header>
+
+      <section class="status-card" aria-live="polite">
+        <div class="status-head">
+          <h2>Статус</h2>
+          <span id="status-badge" class="status-badge free">Свободна</span>
+        </div>
+        <p id="status-main" class="status-main">Свободна, можно занять.</p>
+
+        <div class="status-grid">
+          <article class="metric-block">
+            <p class="metric-label">Комната / кто занял</p>
+            <p id="occupied-by" class="metric-value">—</p>
+          </article>
+
+          <article class="metric-block">
+            <p class="metric-label">Оставшееся время</p>
+            <p id="countdown" class="metric-value">—</p>
+          </article>
+        </div>
+
+        <p id="occupied-until" class="meta-line">Занята до: —</p>
+        <p id="updated-at" class="meta-line">Обновлено: —</p>
+      </section>
+
+      <section class="panel">
+        <h3>Занять машинку</h3>
+        <p class="panel-hint">Пока машинка занята, кнопку «Занять» использовать нельзя.</p>
+
+        <form id="occupy-form" class="inline-form">
+          <label for="occupied-by-input">Комната или имя</label>
+          <input
+            id="occupied-by-input"
+            name="occupiedBy"
+            type="text"
+            minlength="1"
+            maxlength="64"
+            placeholder="например, 417"
+            required
+          />
+
+          <div class="preset-buttons" role="group" aria-label="Быстрый выбор времени">
+            <button type="button" data-minutes="30" class="ghost-button">30 мин</button>
+            <button type="button" data-minutes="45" class="ghost-button">45 мин</button>
+            <button type="button" data-minutes="60" class="ghost-button">60 мин</button>
+            <button type="button" data-minutes="90" class="ghost-button">90 мин</button>
+          </div>
+
+          <label for="minutes-input">Время (минуты)</label>
+          <input
+            id="minutes-input"
+            name="minutes"
+            type="number"
+            min="1"
+            max="1440"
+            step="1"
+            placeholder="например, 75"
+            required
+          />
+          <button id="occupy-button" type="submit" class="solid-button">Занять машинку</button>
+        </form>
+
+        <button id="release-button" class="danger-button">Освободить машинку</button>
+      </section>
+
+      <section class="panel">
+        <h3>История стирок</h3>
+        <p id="history-empty" class="history-empty">Истории пока нет.</p>
+        <ul id="history-list" class="history-list" aria-live="polite"></ul>
+      </section>
+
+      <p id="flash" class="flash" role="status" aria-live="assertive"></p>
+    </main>
+
+    <dialog id="pin-dialog" class="pin-dialog">
+      <form id="pin-form" class="pin-form" method="dialog">
+        <h3 id="pin-title">Подтверждение</h3>
+        <p id="pin-subtitle" class="panel-hint">Введите PIN-код для действия.</p>
+        <label for="pin-dialog-input">PIN-код</label>
+        <input
+          id="pin-dialog-input"
+          type="password"
+          minlength="4"
+          maxlength="32"
+          placeholder="Введите PIN"
+          autocomplete="current-password"
+          required
+        />
+        <p id="pin-error" class="pin-error" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button id="pin-cancel-button" type="button" class="ghost-button">Отмена</button>
+          <button type="submit" class="solid-button">Подтвердить</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

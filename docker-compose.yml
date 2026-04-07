@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  laundry-status-web:
+    build: .
+    container_name: laundry-status-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - STATUS_PIN=${STATUS_PIN:-1234}
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
