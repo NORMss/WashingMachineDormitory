@@ -10,6 +10,9 @@ services:
     environment:
       - PORT=3000
       - STATUS_PIN=${STATUS_PIN:-1234}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_API_BASE_URL=${TELEGRAM_API_BASE_URL:-https://api.telegram.org}
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json

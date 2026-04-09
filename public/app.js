@@ -1,16 +1,18 @@
 const dom = {
   statusBadge: document.getElementById("status-badge"),
   statusMain: document.getElementById("status-main"),
-  occupiedBy: document.getElementById("occupied-by"),
+  occupiedRoom: document.getElementById("occupied-room"),
   countdown: document.getElementById("countdown"),
   occupiedUntil: document.getElementById("occupied-until"),
   updatedAt: document.getElementById("updated-at"),
+  roomsSuggestions: document.getElementById("rooms-suggestions"),
+  roomQuickList: document.getElementById("room-quick-list"),
   historyList: document.getElementById("history-list"),
   historyEmpty: document.getElementById("history-empty"),
   flash: document.getElementById("flash"),
   occupyForm: document.getElementById("occupy-form"),
   occupyButton: document.getElementById("occupy-button"),
-  occupiedByInput: document.getElementById("occupied-by-input"),
+  occupiedRoomInput: document.getElementById("occupied-room-input"),
   minutesInput: document.getElementById("minutes-input"),
   releaseButton: document.getElementById("release-button"),
   pinDialog: document.getElementById("pin-dialog"),
@@ -24,6 +26,7 @@ const dom = {
 
 const presetButtons = Array.from(document.querySelectorAll("[data-minutes]"));
 const MAX_OCCUPY_MINUTES = 1440;
+const ROOM_PATTERN = /^(?=.*\d)[0-9A-Za-zА-Яа-я\-_/]{1,16}$/u;
 
 let currentStatus = null;
 let hideFlashTimer = null;
@@ -73,7 +76,7 @@ function showFlash(message, isError = false) {
 
 function setOccupiedControls(isOccupied) {
   dom.occupyButton.disabled = isOccupied;
-  dom.occupiedByInput.disabled = isOccupied;
+  dom.occupiedRoomInput.disabled = isOccupied;
   dom.minutesInput.disabled = isOccupied;
   presetButtons.forEach((button) => {
     button.disabled = isOccupied;
@@ -90,7 +93,7 @@ function renderStatus(status) {
     dom.statusBadge.classList.remove("free");
     dom.statusBadge.classList.add("busy");
     dom.statusMain.textContent = "Машинка занята";
-    dom.occupiedBy.textContent = status.occupiedBy || "—";
+    dom.occupiedRoom.textContent = status.occupiedRoom || status.occupiedBy || "—";
     dom.occupiedUntil.textContent = `Занята до: ${formatDateTime(status.occupiedUntil)}`;
     const leftMs = new Date(status.occupiedUntil).getTime() - Date.now();
     dom.countdown.textContent = formatCountdown(leftMs);
@@ -102,10 +105,35 @@ function renderStatus(status) {
   dom.statusBadge.classList.remove("busy");
   dom.statusBadge.classList.add("free");
   dom.statusMain.textContent = "Свободна, можно занять.";
-  dom.occupiedBy.textContent = "—";
+  dom.occupiedRoom.textContent = "—";
   dom.occupiedUntil.textContent = "Занята до: —";
   dom.countdown.textContent = "—";
   setOccupiedControls(false);
+}
+
+function renderRoomSuggestions(items) {
+  dom.roomsSuggestions.innerHTML = "";
+  dom.roomQuickList.innerHTML = "";
+
+  (items || []).forEach((room) => {
+    const option = document.createElement("option");
+    option.value = room;
+    dom.roomsSuggestions.append(option);
+
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "room-chip";
+    chip.textContent = room;
+    chip.addEventListener("click", () => {
+      if (dom.occupiedRoomInput.disabled) {
+        return;
+      }
+
+      dom.occupiedRoomInput.value = room;
+      dom.occupiedRoomInput.focus();
+    });
+    dom.roomQuickList.append(chip);
+  });
 }
 
 function renderHistory(items) {
@@ -122,7 +150,8 @@ function renderHistory(items) {
 
     const main = document.createElement("p");
     main.className = "history-main";
-    main.textContent = `${entry.occupiedBy} - ${formatDuration(entry.durationMinutes)}`;
+    const room = entry.occupiedRoom || entry.occupiedBy || "—";
+    main.textContent = `Комната ${room} - ${formatDuration(entry.durationMinutes)}`;
 
     const meta = document.createElement("p");
     meta.className = "history-meta";
@@ -165,6 +194,15 @@ async function refreshHistory() {
   }
 }
 
+async function refreshRoomSuggestions() {
+  try {
+    const response = await request("/api/rooms?limit=40");
+    renderRoomSuggestions(response.items || []);
+  } catch (error) {
+    showFlash(error.message || "Не удалось получить список комнат.", true);
+  }
+}
+
 function openPinDialog(title, subtitle, handler) {
   pendingPinAction = handler;
   dom.pinTitle.textContent = title;
@@ -183,18 +221,18 @@ function closePinDialog() {
 }
 
 function validateOccupyInput() {
-  const occupiedBy = dom.occupiedByInput.value.trim();
+  const occupiedRoom = dom.occupiedRoomInput.value.trim();
   const minutes = Number(dom.minutesInput.value);
 
-  if (!occupiedBy) {
-    showFlash("Укажи комнату или имя.", true);
-    dom.occupiedByInput.focus();
+  if (!occupiedRoom) {
+    showFlash("Укажи номер комнаты.", true);
+    dom.occupiedRoomInput.focus();
     return null;
   }
 
-  if (occupiedBy.length > 64) {
-    showFlash("Поле комнаты/имени должно быть до 64 символов.", true);
-    dom.occupiedByInput.focus();
+  if (!ROOM_PATTERN.test(occupiedRoom)) {
+    showFlash("Комната: до 16 символов, только буквы/цифры и -, _, /, минимум 1 цифра.", true);
+    dom.occupiedRoomInput.focus();
     return null;
   }
 
@@ -204,18 +242,19 @@ function validateOccupyInput() {
     return null;
   }
 
-  return { occupiedBy, minutes };
+  return { occupiedRoom, minutes };
 }
 
 async function occupyMachine(pin, payload) {
   const status = await request("/api/status/occupy", {
     minutes: payload.minutes,
-    occupiedBy: payload.occupiedBy,
+    occupiedRoom: payload.occupiedRoom,
     pin,
   });
 
   renderStatus(status);
   await refreshHistory();
+  await refreshRoomSuggestions();
   showFlash("Машинка отмечена как занята.");
 }
 
@@ -223,6 +262,7 @@ async function releaseMachine(pin) {
   const status = await request("/api/status/release", { pin });
   renderStatus(status);
   await refreshHistory();
+  await refreshRoomSuggestions();
   showFlash("Машинка освобождена.");
 }
 
@@ -314,6 +354,8 @@ setInterval(() => {
 
 setInterval(refreshStatus, 15000);
 setInterval(refreshHistory, 45000);
+setInterval(refreshRoomSuggestions, 90000);
 
 refreshStatus();
 refreshHistory();
+refreshRoomSuggestions();

@@ -25,8 +25,8 @@
 
         <div class="status-grid">
           <article class="metric-block">
-            <p class="metric-label">Комната / кто занял</p>
-            <p id="occupied-by" class="metric-value">—</p>
+            <p class="metric-label">Комната</p>
+            <p id="occupied-room" class="metric-value">—</p>
           </article>
 
           <article class="metric-block">
@@ -44,16 +44,22 @@
         <p class="panel-hint">Пока машинка занята, кнопку «Занять» использовать нельзя.</p>
 
         <form id="occupy-form" class="inline-form">
-          <label for="occupied-by-input">Комната или имя</label>
+          <label for="occupied-room-input">Комната</label>
           <input
-            id="occupied-by-input"
-            name="occupiedBy"
+            id="occupied-room-input"
+            name="occupiedRoom"
             type="text"
             minlength="1"
-            maxlength="64"
+            maxlength="16"
+            pattern="(?=.*\d)[0-9A-Za-zА-Яа-я\-_/]{1,16}"
+            title="До 16 символов, минимум 1 цифра; допустимы буквы, цифры, -, _, /"
             placeholder="например, 417"
+            list="rooms-suggestions"
             required
           />
+          <datalist id="rooms-suggestions"></datalist>
+          <p class="room-quick-label">Недавние комнаты</p>
+          <div id="room-quick-list" class="room-quick-list"></div>
 
           <div class="preset-buttons" role="group" aria-label="Быстрый выбор времени">
             <button type="button" data-minutes="30" class="ghost-button">30 мин</button>

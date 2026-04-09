@@ -12,12 +12,22 @@ const CONFIG_FILE = path.join(__dirname, "config.json");
 const MAX_OCCUPY_MINUTES = 24 * 60;
 const MAX_HISTORY_ITEMS = 200;
 const DEFAULT_STATUS_PIN = "1234";
+const ROOM_PATTERN = /^(?=.*\d)[0-9A-Za-zА-Яа-я\-_/]{1,16}$/u;
+const TELEGRAM_BOT_TOKEN =
+  typeof process.env.TELEGRAM_BOT_TOKEN === "string" ? process.env.TELEGRAM_BOT_TOKEN.trim() : "";
+const TELEGRAM_CHAT_ID = typeof process.env.TELEGRAM_CHAT_ID === "string" ? process.env.TELEGRAM_CHAT_ID.trim() : "";
+const TELEGRAM_API_BASE_URL =
+  typeof process.env.TELEGRAM_API_BASE_URL === "string" && process.env.TELEGRAM_API_BASE_URL.trim()
+    ? process.env.TELEGRAM_API_BASE_URL.trim().replace(/\/+$/, "")
+    : "https://api.telegram.org";
+const TELEGRAM_ENABLED = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
 
 function createDefaultStatus() {
   return {
     occupied: false,
     occupiedUntil: null,
     occupiedFrom: null,
+    occupiedRoom: null,
     occupiedBy: null,
     updatedAt: new Date().toISOString(),
   };
@@ -48,10 +58,13 @@ async function ensureStorage() {
     await fs.writeFile(HISTORY_FILE, JSON.stringify(createDefaultHistory(), null, 2));
   }
 
-  try {
-    await fs.access(CONFIG_FILE);
-  } catch {
-    await fs.writeFile(CONFIG_FILE, JSON.stringify(createDefaultConfig(), null, 2));
+  const hasEnvPin = typeof process.env.STATUS_PIN === "string" && process.env.STATUS_PIN.trim().length >= 4;
+  if (!hasEnvPin) {
+    try {
+      await fs.access(CONFIG_FILE);
+    } catch {
+      await fs.writeFile(CONFIG_FILE, JSON.stringify(createDefaultConfig(), null, 2));
+    }
   }
 }
 
@@ -64,6 +77,19 @@ function sanitizeConfig(rawConfig) {
   return {
     statusPin: pin,
   };
+}
+
+function normalizeRoom(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (!normalized || !ROOM_PATTERN.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
 }
 
 function sanitizeStatus(rawStatus) {
@@ -82,18 +108,16 @@ function sanitizeStatus(rawStatus) {
     typeof rawStatus?.occupiedFrom === "string" && !Number.isNaN(Date.parse(rawStatus.occupiedFrom))
       ? rawStatus.occupiedFrom
       : updatedAt;
-  const occupiedByValue =
-    typeof rawStatus?.occupiedBy === "string" && rawStatus.occupiedBy.trim().length > 0
-      ? rawStatus.occupiedBy.trim().slice(0, 64)
-      : null;
+  const occupiedRoomValue = normalizeRoom(rawStatus?.occupiedRoom || rawStatus?.occupiedBy);
 
-  const hasValidOccupiedState = occupied && Boolean(occupiedUntilValue) && Boolean(occupiedByValue);
+  const hasValidOccupiedState = occupied && Boolean(occupiedUntilValue) && Boolean(occupiedRoomValue);
 
   return {
     occupied: hasValidOccupiedState,
     occupiedUntil: hasValidOccupiedState ? occupiedUntilValue : null,
     occupiedFrom: hasValidOccupiedState ? occupiedFromValue : null,
-    occupiedBy: hasValidOccupiedState ? occupiedByValue : null,
+    occupiedRoom: hasValidOccupiedState ? occupiedRoomValue : null,
+    occupiedBy: hasValidOccupiedState ? occupiedRoomValue : null,
     updatedAt,
   };
 }
@@ -107,10 +131,7 @@ function sanitizeHistoryEntry(rawEntry) {
     typeof rawEntry?.finishedAt === "string" && !Number.isNaN(Date.parse(rawEntry.finishedAt))
       ? rawEntry.finishedAt
       : null;
-  const occupiedBy =
-    typeof rawEntry?.occupiedBy === "string" && rawEntry.occupiedBy.trim().length > 0
-      ? rawEntry.occupiedBy.trim().slice(0, 64)
-      : null;
+  const occupiedRoom = normalizeRoom(rawEntry?.occupiedRoom || rawEntry?.occupiedBy);
   const plannedUntil =
     typeof rawEntry?.plannedUntil === "string" && !Number.isNaN(Date.parse(rawEntry.plannedUntil))
       ? rawEntry.plannedUntil
@@ -120,13 +141,14 @@ function sanitizeHistoryEntry(rawEntry) {
     : "manual";
   const durationMinutes = Number(rawEntry?.durationMinutes);
 
-  if (!startedAt || !finishedAt || !occupiedBy) {
+  if (!startedAt || !finishedAt || !occupiedRoom) {
     return null;
   }
 
   return {
     id: typeof rawEntry?.id === "string" && rawEntry.id.trim() ? rawEntry.id.trim() : randomUUID(),
-    occupiedBy,
+    occupiedRoom,
+    occupiedBy: occupiedRoom,
     startedAt,
     plannedUntil,
     finishedAt,
@@ -147,6 +169,83 @@ function sanitizeHistory(rawHistory) {
     .slice(0, MAX_HISTORY_ITEMS);
 }
 
+function formatTelegramDate(isoDate) {
+  if (!isoDate || Number.isNaN(Date.parse(isoDate))) {
+    return "—";
+  }
+
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(isoDate));
+}
+
+function buildTelegramMessage(eventType, payload) {
+  if (eventType === "occupied") {
+    return [
+      "🧺 Машинка занята",
+      `🏠 Комната: ${payload.occupiedRoom || payload.occupiedBy || "—"}`,
+      `⏳ До: ${formatTelegramDate(payload.occupiedUntil)}`,
+      `🕒 Обновлено: ${formatTelegramDate(payload.updatedAt)}`,
+    ].join("\n");
+  }
+
+  if (eventType === "released") {
+    return [
+      "✅ Машинка свободна",
+      payload.previousOccupiedRoom ? `🏠 Была занята: ${payload.previousOccupiedRoom}` : null,
+      payload.reasonText ? `ℹ️ Причина: ${payload.reasonText}` : null,
+      `🕒 Время: ${formatTelegramDate(payload.updatedAt)}`,
+    ]
+      .filter((line) => Boolean(line))
+      .join("\n");
+  }
+
+  return null;
+}
+
+async function sendTelegramMessage(text) {
+  if (!TELEGRAM_ENABLED || !text) {
+    return;
+  }
+
+  const response = await fetch(`${TELEGRAM_API_BASE_URL}/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text,
+      disable_web_page_preview: true,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Telegram API ${response.status}: ${body.slice(0, 300)}`);
+  }
+}
+
+async function notifyTelegramStatus(eventType, payload) {
+  if (!TELEGRAM_ENABLED) {
+    return;
+  }
+
+  const message = buildTelegramMessage(eventType, payload);
+  if (!message) {
+    return;
+  }
+
+  try {
+    await sendTelegramMessage(message);
+  } catch (error) {
+    process.stderr.write(`Telegram notify error: ${error?.message || String(error)}\n`);
+  }
+}
+
 async function readStatus() {
   await ensureStorage();
   const rawFile = await fs.readFile(STATUS_FILE, "utf-8");
@@ -155,10 +254,20 @@ async function readStatus() {
 }
 
 async function readConfig() {
+  const envPin = typeof process.env.STATUS_PIN === "string" ? process.env.STATUS_PIN.trim() : "";
+  if (envPin.length >= 4 && envPin.length <= 32) {
+    return sanitizeConfig({ statusPin: envPin });
+  }
+
   await ensureStorage();
-  const rawFile = await fs.readFile(CONFIG_FILE, "utf-8");
-  const parsed = JSON.parse(rawFile);
-  return sanitizeConfig(parsed);
+
+  try {
+    const rawFile = await fs.readFile(CONFIG_FILE, "utf-8");
+    const parsed = JSON.parse(rawFile);
+    return sanitizeConfig(parsed);
+  } catch {
+    return sanitizeConfig({});
+  }
 }
 
 async function readHistory() {
@@ -177,7 +286,9 @@ async function writeHistory(history) {
 }
 
 function buildHistoryEntry(status, finishedAt, endReason) {
-  if (!status.occupied || !status.occupiedBy || !status.occupiedUntil) {
+  const occupiedRoom = normalizeRoom(status.occupiedRoom || status.occupiedBy);
+
+  if (!status.occupied || !occupiedRoom || !status.occupiedUntil) {
     return null;
   }
 
@@ -189,7 +300,8 @@ function buildHistoryEntry(status, finishedAt, endReason) {
 
   return {
     id: randomUUID(),
-    occupiedBy: status.occupiedBy,
+    occupiedRoom,
+    occupiedBy: occupiedRoom,
     startedAt,
     plannedUntil: status.occupiedUntil,
     finishedAt,
@@ -222,6 +334,37 @@ function isExpired(status) {
   return Date.parse(status.occupiedUntil) <= Date.now();
 }
 
+async function getRoomSuggestions(limit = 24) {
+  const safeLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 24;
+  const roomsMap = new Map();
+
+  const currentStatus = await readStatus();
+  const currentRoom = normalizeRoom(currentStatus.occupiedRoom || currentStatus.occupiedBy);
+  if (currentRoom) {
+    roomsMap.set(currentRoom, { room: currentRoom, lastUsedAt: currentStatus.updatedAt });
+  }
+
+  const history = await readHistory();
+  history.forEach((entry) => {
+    const room = normalizeRoom(entry.occupiedRoom || entry.occupiedBy);
+    if (!room) {
+      return;
+    }
+
+    const known = roomsMap.get(room);
+    const entryTime = typeof entry.finishedAt === "string" ? entry.finishedAt : entry.startedAt;
+
+    if (!known || Date.parse(entryTime) > Date.parse(known.lastUsedAt)) {
+      roomsMap.set(room, { room, lastUsedAt: entryTime });
+    }
+  });
+
+  return Array.from(roomsMap.values())
+    .sort((a, b) => Date.parse(b.lastUsedAt) - Date.parse(a.lastUsedAt))
+    .slice(0, safeLimit)
+    .map((item) => item.room);
+}
+
 async function getCurrentStatus() {
   const status = await readStatus();
 
@@ -234,6 +377,7 @@ async function getCurrentStatus() {
     occupied: false,
     occupiedUntil: null,
     occupiedFrom: null,
+    occupiedRoom: null,
     occupiedBy: null,
     updatedAt: new Date().toISOString(),
   };
@@ -241,6 +385,12 @@ async function getCurrentStatus() {
   await appendHistoryFromStatus(status, status.occupiedUntil, "auto");
 
   await writeStatus(releasedStatus);
+  void notifyTelegramStatus("released", {
+    previousOccupiedRoom: status.occupiedRoom || status.occupiedBy,
+    reasonText: "таймер завершился",
+    updatedAt: releasedStatus.updatedAt,
+  });
+
   return releasedStatus;
 }
 
@@ -296,9 +446,23 @@ app.get("/api/history", async (req, res) => {
   }
 });
 
+app.get("/api/rooms", async (req, res) => {
+  const limit = Number(req.query?.limit);
+
+  try {
+    const items = await getRoomSuggestions(limit);
+    return res.json({
+      items,
+      total: items.length,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Не удалось получить список комнат." });
+  }
+});
+
 app.post("/api/status/occupy", async (req, res) => {
   const minutes = Number(req.body?.minutes);
-  const occupiedBy = typeof req.body?.occupiedBy === "string" ? req.body.occupiedBy.trim() : "";
+  const occupiedRoom = normalizeRoom(req.body?.occupiedRoom || req.body?.occupiedBy);
 
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_OCCUPY_MINUTES) {
     return res.status(400).json({
@@ -306,9 +470,9 @@ app.post("/api/status/occupy", async (req, res) => {
     });
   }
 
-  if (!occupiedBy || occupiedBy.length > 64) {
+  if (!occupiedRoom) {
     return res.status(400).json({
-      error: "Укажите, кем занята машинка (от 1 до 64 символов).",
+      error: "Укажите корректный номер комнаты (до 16 символов, должна быть хотя бы 1 цифра).",
     });
   }
 
@@ -321,7 +485,7 @@ app.post("/api/status/occupy", async (req, res) => {
     if (current.occupied) {
       return res.status(409).json({
         error: "Машинка уже занята. Дождитесь завершения или освободите ее вручную.",
-        occupiedBy: current.occupiedBy,
+        occupiedRoom: current.occupiedRoom || current.occupiedBy,
         occupiedUntil: current.occupiedUntil,
       });
     }
@@ -334,11 +498,14 @@ app.post("/api/status/occupy", async (req, res) => {
       occupied: true,
       occupiedUntil,
       occupiedFrom,
-      occupiedBy,
+      occupiedRoom,
+      occupiedBy: occupiedRoom,
       updatedAt: new Date().toISOString(),
     };
 
     await writeStatus(next);
+    void notifyTelegramStatus("occupied", next);
+
     return res.json(next);
   } catch (error) {
     return res.status(500).json({ error: "Не удалось обновить статус." });
@@ -361,11 +528,20 @@ app.post("/api/status/release", async (req, res) => {
       occupied: false,
       occupiedUntil: null,
       occupiedFrom: null,
+      occupiedRoom: null,
       occupiedBy: null,
       updatedAt: new Date().toISOString(),
     };
 
     await writeStatus(next);
+    if (current.occupied) {
+      void notifyTelegramStatus("released", {
+        previousOccupiedRoom: current.occupiedRoom || current.occupiedBy,
+        reasonText: "освобождена вручную",
+        updatedAt: next.updatedAt,
+      });
+    }
+
     return res.json(next);
   } catch (error) {
     return res.status(500).json({ error: "Не удалось освободить машинку." });
@@ -378,6 +554,11 @@ app.get("*", (req, res) => {
 
 async function start() {
   await ensureStorage();
+
+  if (TELEGRAM_ENABLED) {
+    process.stdout.write(`Telegram notifications enabled for chat ${TELEGRAM_CHAT_ID}\n`);
+  }
+
   app.listen(PORT, () => {
     process.stdout.write(`Laundry status app started on port ${PORT}\n`);
   });
