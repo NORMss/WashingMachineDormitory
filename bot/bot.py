@@ -40,6 +40,11 @@ LOCAL_TZ = timezone(timedelta(hours=TZ_OFFSET))
 # Room pattern mirrors the server validation rule
 ROOM_RE = re.compile(r"^(?=.*\d)[0-9A-Za-zА-Яа-яёЁ\-_/]{1,16}$")
 
+# occupiedUntil value set by the bot itself via chat message.
+# The poller skips the "occupied" notification for this session
+# because the user already got "✅ Записано!" as a reply.
+_bot_set_occupied_until: Optional[str] = None
+
 # Matches "До HH:MM", "до 19;00", "22.13", "00:10:00" — full message only.
 # Separators: colon, dot, semicolon. Optional "до" prefix, optional seconds.
 TIME_RE = re.compile(
@@ -131,7 +136,8 @@ async def api_get_history(limit: int = 5) -> Optional[list]:
         return None
 
 
-async def api_occupy(minutes: int, room: str) -> tuple[bool, str]:
+async def api_occupy(minutes: int, room: str) -> tuple[bool, str, Optional[str]]:
+    """Returns (success, error_message, occupiedUntil_iso_or_None)."""
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(
@@ -139,16 +145,16 @@ async def api_occupy(minutes: int, room: str) -> tuple[bool, str]:
                 json={"minutes": minutes, "occupiedRoom": room, "pin": BOT_PIN},
             )
             if r.status_code == 200:
-                return True, ""
+                return True, "", r.json().get("occupiedUntil")
             data = r.json()
             if r.status_code == 409:
                 occupied_room = data.get("occupiedRoom") or "?"
                 occupied_until = fmt_iso(data.get("occupiedUntil"))
-                return False, f"Машинка уже занята (комната {occupied_room}, до {occupied_until})"
-            return False, data.get("error", "Ошибка сервера")
+                return False, f"Машинка уже занята (комната {occupied_room}, до {occupied_until})", None
+            return False, data.get("error", "Ошибка сервера"), None
     except Exception as e:
         logger.warning("api_occupy error: %s", e)
-        return False, "Нет связи с сервером"
+        return False, "Нет связи с сервером", None
 
 
 async def api_release() -> tuple[bool, str]:
@@ -182,25 +188,26 @@ async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "  до 19;00\n"
         "  22.13\n\n"
         "Перед первым использованием укажи свою комнату:\n"
-        "  /setroom 301"
+        "  /setroom 301",
+        disable_notification=True,
     )
 
 
 async def cmd_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     status = await api_get_status()
     if status is None:
-        await update.message.reply_text("❌ Нет связи с сервером")
+        await update.message.reply_text("❌ Нет связи с сервером", disable_notification=True)
         return
-    await update.message.reply_text(fmt_status(status))
+    await update.message.reply_text(fmt_status(status), disable_notification=True)
 
 
 async def cmd_history(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     items = await api_get_history(5)
     if items is None:
-        await update.message.reply_text("❌ Нет связи с сервером")
+        await update.message.reply_text("❌ Нет связи с сервером", disable_notification=True)
         return
     if not items:
-        await update.message.reply_text("История пуста")
+        await update.message.reply_text("История пуста", disable_notification=True)
         return
 
     lines = ["📋 Последние стирки:"]
@@ -210,13 +217,14 @@ async def cmd_history(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         finished = fmt_iso(item.get("finishedAt"))
         duration = item.get("durationMinutes", 0)
         lines.append(f"🏠 {room} — {started}–{finished} ({duration} мин)")
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines), disable_notification=True)
 
 
 async def cmd_setroom(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ctx.args:
         await update.message.reply_text(
-            "Укажи номер комнаты:\n/setroom 301\n/setroom 2-15"
+            "Укажи номер комнаты:\n/setroom 301\n/setroom 2-15",
+            disable_notification=True,
         )
         return
 
@@ -224,14 +232,15 @@ async def cmd_setroom(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ROOM_RE.match(room):
         await update.message.reply_text(
             "❌ Неверный формат. Используй 1–16 символов, минимум 1 цифра.\n"
-            "Примеры: 301, 2-15, комн301"
+            "Примеры: 301, 2-15, комн301",
+            disable_notification=True,
         )
         return
 
     data = _load_data()
     data["rooms"][str(update.effective_user.id)] = room
     _save_data(data)
-    await update.message.reply_text(f"✅ Комната сохранена: {room}")
+    await update.message.reply_text(f"✅ Комната сохранена: {room}", disable_notification=True)
 
 
 async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,9 +248,9 @@ async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     ok, err = await api_release()
     if ok:
-        await update.message.reply_text("✅ Машинка освобождена")
+        await update.message.reply_text("✅ Машинка освобождена", disable_notification=True)
     else:
-        await update.message.reply_text(f"❌ {err}")
+        await update.message.reply_text(f"❌ {err}", disable_notification=True)
 
 
 # ─── Message handler ───────────────────────────────────────────────────────────
@@ -249,6 +258,8 @@ async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Detect 'до HH:MM' style messages and occupy the machine."""
+    global _bot_set_occupied_until
+
     if update.effective_chat.id != CHAT_ID:
         return
     if not update.message or not update.message.text:
@@ -267,13 +278,18 @@ async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(
             "Укажи номер своей комнаты, чтобы занять машинку:\n/setroom 301",
             reply_to_message_id=update.message.message_id,
+            disable_notification=True,
         )
         return
 
     mins = minutes_until(hour, minute)
-    ok, err = await api_occupy(mins, room)
+    ok, err, occupied_until = await api_occupy(mins, room)
 
     if ok:
+        # Tell the poller to skip the notification for this session —
+        # the user already sees "✅ Записано!" as a reply.
+        _bot_set_occupied_until = occupied_until
+
         now = datetime.now(LOCAL_TZ)
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
@@ -281,11 +297,13 @@ async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(
             f"✅ Записано! Машинка занята до {target.strftime('%H:%M')} ({mins} мин)\n🏠 Комната: {room}",
             reply_to_message_id=update.message.message_id,
+            disable_notification=True,
         )
     else:
         await update.message.reply_text(
             f"❌ {err}",
             reply_to_message_id=update.message.message_id,
+            disable_notification=True,
         )
 
 
@@ -294,6 +312,8 @@ async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def poll_status(app: Application) -> None:
     """Background loop: poll API every POLL_INTERVAL seconds, notify on changes."""
+    global _bot_set_occupied_until
+
     # Snapshot initial state silently (avoid notification on bot startup)
     initial = await api_get_status()
     last = {
@@ -325,13 +345,26 @@ async def poll_status(app: Application) -> None:
 
         if state_changed or session_replaced:
             if current["occupied"]:
+                # Skip notification if the bot itself just occupied the machine
+                # via a chat message — the user already got "✅ Записано!" reply.
+                if _bot_set_occupied_until and current["occupiedUntil"] == _bot_set_occupied_until:
+                    logger.info("Suppressed duplicate 'occupied' notification (set by bot)")
+                    _bot_set_occupied_until = None
+                    last = current
+                    continue
+
                 msg = fmt_status(status)
             else:
+                _bot_set_occupied_until = None  # clear on release regardless
                 prev = last.get("occupiedRoom") or "?"
                 msg = f"✅ Машинка свободна\n🏠 Была занята: {prev}"
 
             try:
-                await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                await app.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=msg,
+                    disable_notification=True,
+                )
                 logger.info("Sent notification: occupied=%s", current["occupied"])
             except Exception as e:
                 logger.error("send_message error: %s", e)
