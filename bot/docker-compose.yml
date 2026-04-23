@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  laundry-bot:
+    build: .
+    container_name: laundry-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+      - LAUNDRY_API_URL=${LAUNDRY_API_URL}
+      - BOT_PIN=${BOT_PIN}
+      - POLL_INTERVAL=${POLL_INTERVAL:-30}
+      - TIMEZONE_OFFSET=${TIMEZONE_OFFSET:-3}
+    volumes:
+      - ./data:/data
