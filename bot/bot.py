@@ -40,10 +40,9 @@ LOCAL_TZ = timezone(timedelta(hours=TZ_OFFSET))
 # Room pattern mirrors the server validation rule
 ROOM_RE = re.compile(r"^(?=.*\d)[0-9A-Za-zА-Яа-яёЁ\-_/]{1,16}$")
 
-# occupiedUntil value set by the bot itself via chat message.
-# The poller skips the "occupied" notification for this session
-# because the user already got "✅ Записано!" as a reply.
-_bot_set_occupied_until: Optional[str] = None
+# True while the machine is occupied via a Telegram message.
+# The poller skips "occupied" notifications until the machine is released.
+_bot_occupied: bool = False
 
 # Matches "До HH:MM", "до 19;00", "22.13", "00:10:00" — full message only.
 # Separators: colon, dot, semicolon. Optional "до" prefix, optional seconds.
@@ -108,7 +107,7 @@ def fmt_status(status: dict) -> str:
         return "✅ Машинка свободна"
     room = status.get("occupiedRoom") or status.get("occupiedBy") or "?"
     until = fmt_iso(status.get("occupiedUntil"))
-    return f"🧺 Машинка занята\n🏠 Комната: {room}\n⏳ До: {until}"
+    return f"🧺 Занята\n🏠 {room} · до {until}\n{LAUNDRY_API_URL}"
 
 
 # ─── API calls ─────────────────────────────────────────────────────────────────
@@ -258,7 +257,7 @@ async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Detect 'до HH:MM' style messages and occupy the machine."""
-    global _bot_set_occupied_until
+    global _bot_occupied
 
     if update.effective_chat.id != CHAT_ID:
         return
@@ -286,16 +285,14 @@ async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
     ok, err, occupied_until = await api_occupy(mins, room)
 
     if ok:
-        # Tell the poller to skip the notification for this session —
-        # the user already sees "✅ Записано!" as a reply.
-        _bot_set_occupied_until = occupied_until
+        _bot_occupied = True
 
         now = datetime.now(LOCAL_TZ)
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
         await update.message.reply_text(
-            f"✅ Записано! Машинка занята до {target.strftime('%H:%M')} ({mins} мин)\n🏠 Комната: {room}",
+            f"✅ До {target.strftime('%H:%M')} ({mins} мин)",
             reply_to_message_id=update.message.message_id,
             disable_notification=True,
         )
@@ -312,7 +309,7 @@ async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def poll_status(app: Application) -> None:
     """Background loop: poll API every POLL_INTERVAL seconds, notify on changes."""
-    global _bot_set_occupied_until
+    global _bot_occupied
 
     # Snapshot initial state silently (avoid notification on bot startup)
     initial = await api_get_status()
@@ -345,19 +342,14 @@ async def poll_status(app: Application) -> None:
 
         if state_changed or session_replaced:
             if current["occupied"]:
-                # Skip notification if the bot itself just occupied the machine
-                # via a chat message — the user already got "✅ Записано!" reply.
-                if _bot_set_occupied_until and current["occupiedUntil"] == _bot_set_occupied_until:
-                    logger.info("Suppressed duplicate 'occupied' notification (set by bot)")
-                    _bot_set_occupied_until = None
+                if _bot_occupied:
+                    logger.info("Suppressed 'occupied' notification (set via Telegram)")
                     last = current
                     continue
-
                 msg = fmt_status(status)
             else:
-                _bot_set_occupied_until = None  # clear on release regardless
-                prev = last.get("occupiedRoom") or "?"
-                msg = f"✅ Машинка свободна\n🏠 Была занята: {prev}"
+                _bot_occupied = False
+                msg = "✅ Машинка свободна"
 
             try:
                 await app.bot.send_message(
