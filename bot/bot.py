@@ -272,17 +272,12 @@ async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     data = _load_data()
     room = data["rooms"].get(str(update.effective_user.id))
+    unknown_room = room is None
 
-    if not room:
-        await update.message.reply_text(
-            "Укажи номер своей комнаты, чтобы занять машинку:\n/setroom 301",
-            reply_to_message_id=update.message.message_id,
-            disable_notification=True,
-        )
-        return
+    api_room = room if room else "777"
 
     mins = minutes_until(hour, minute)
-    ok, err, occupied_until = await api_occupy(mins, room)
+    ok, err, occupied_until = await api_occupy(mins, api_room)
 
     if ok:
         _bot_occupied = True
@@ -291,8 +286,13 @@ async def handle_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> Non
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
+
+        reply = f"✅ До {target.strftime('%H:%M')} ({mins} мин)"
+        if unknown_room:
+            reply += "\n\nУкажи номер своей комнаты:\n/setroom 301"
+
         await update.message.reply_text(
-            f"✅ До {target.strftime('%H:%M')} ({mins} мин)",
+            reply,
             reply_to_message_id=update.message.message_id,
             disable_notification=True,
         )
